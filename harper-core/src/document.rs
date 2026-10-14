@@ -1,21 +1,9 @@
 use std::cmp::Ordering;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::fmt::Display;
 
 use harper_brill::{Chunker, UPOS, rule_chunker};
 
-// FussBucket: part-of-speech tags supplied by the host app (Apple's NLTagger),
-// keyed by the char index where each word starts. Set on the thread that
-// parses; when present, they win over the dictionary's tag.
-thread_local! {
-    static EXTERNAL_TAGS: std::cell::RefCell<Option<std::collections::HashMap<usize, UPOS>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-/// Supply tags for the next documents parsed on this thread (`None` clears them).
-pub fn set_external_tags(tags: Option<std::collections::HashMap<usize, UPOS>>) {
-    EXTERNAL_TAGS.with(|t| *t.borrow_mut() = tags);
-}
 use itertools::Itertools;
 
 use crate::expr::{Expr, ExprExt, FirstMatchOf, Repeating, SequenceExpr};
@@ -88,9 +76,36 @@ impl Document {
         let tokens = parser.parse(&source);
 
         let mut document = Self { source, tokens };
-        document.parse(dictionary);
+        document.parse(dictionary, None);
 
         document
+    }
+
+    /// FussBucket: like [`Self::new_from_chars`], with part-of-speech tags supplied by the
+    /// caller (Apple's NLTagger in FussBucket), keyed by the char index where each word
+    /// starts. A supplied tag wins over the dictionary's; untagged words fall back to it.
+    pub fn new_from_chars_with_tags(
+        source: Lrc<[char]>,
+        parser: &impl Parser,
+        dictionary: &impl Dictionary,
+        tags: &HashMap<usize, UPOS>,
+    ) -> Self {
+        let tokens = parser.parse(&source);
+
+        let mut document = Self { source, tokens };
+        document.parse(dictionary, Some(tags));
+
+        document
+    }
+
+    /// FussBucket: plain English with caller-supplied tags (see [`Self::new_from_chars_with_tags`]).
+    pub fn new_plain_english_with_tags(
+        text: &str,
+        dictionary: &impl Dictionary,
+        tags: &HashMap<usize, UPOS>,
+    ) -> Self {
+        let source: Lrc<_> = text.chars().collect();
+        Self::new_from_chars_with_tags(source, &PlainEnglish, dictionary, tags)
     }
 
     /// Create a new document from character data using the built-in [`PlainEnglish`]
@@ -185,7 +200,7 @@ impl Document {
     /// Re-parse important language constructs.
     ///
     /// Should be run after every change to the underlying [`Self::source`].
-    fn parse(&mut self, dictionary: &impl Dictionary) {
+    fn parse(&mut self, dictionary: &impl Dictionary, external: Option<&HashMap<usize, UPOS>>) {
         self.apply_fixups();
 
         // FussBucket: no trained tagger or chunker. Tags come from the curated
@@ -204,8 +219,8 @@ impl Document {
                 .iter()
                 .filter(|t| !t.kind.is_whitespace())
                 .map(|t| match &t.kind {
-                    TokenKind::Word(_) => EXTERNAL_TAGS
-                        .with(|e| e.borrow().as_ref().and_then(|m| m.get(&t.span.start).copied()))
+                    TokenKind::Word(_) => external
+                        .and_then(|m| m.get(&t.span.start).copied())
                         .or_else(|| {
                             dictionary
                                 .get_word_metadata(t.get_ch(&self.source))
@@ -1071,6 +1086,20 @@ mod tests {
     #[test]
     fn condenses_nsa() {
         assert_token_count(r#"Condenses words like "i.e.", "e.g." and "N.S.A.""#, 20);
+    }
+
+    #[test]
+    fn supplied_tags_win_over_the_dictionary() {
+        use crate::spell::FstDictionary;
+        use harper_brill::UPOS;
+        use std::collections::HashMap;
+        let dict = FstDictionary::curated();
+        // "can" is a noun or a verb in the dictionary; the caller says verb.
+        let mut tags = HashMap::new();
+        tags.insert(5, UPOS::VERB);
+        let doc = Document::new_plain_english_with_tags("They can fish.", &*dict, &tags);
+        let can = doc.get_tokens().iter().find(|t| t.get_str(doc.get_source()) == "can").unwrap();
+        assert_eq!(can.kind.as_word().unwrap().as_ref().unwrap().pos_tag, Some(UPOS::VERB));
     }
 
     #[test]
