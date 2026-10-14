@@ -7,8 +7,8 @@ mod upos;
 #[cfg(feature = "training")]
 mod word_counter;
 
-pub use chunker::{
-    BrillChunker, BurnChunker, BurnChunkerCpu, CachedChunker, Chunker, UPOSFreqDict,
-};
+#[cfg(feature = "burn")]
+pub use chunker::{BurnChunker, BurnChunkerCpu};
+pub use chunker::{BrillChunker, CachedChunker, Chunker, RuleChunker, UPOSFreqDict};
 pub use tagger::{BrillTagger, FreqDict, FreqDictBuilder, Tagger};
 pub use upos::{UPOS, UPOSIter};

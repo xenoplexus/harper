@@ -2,7 +2,20 @@ use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::fmt::Display;
 
-use harper_brill::{Chunker, Tagger, brill_tagger, burn_chunker};
+use harper_brill::{Chunker, UPOS, rule_chunker};
+
+// FussBucket: part-of-speech tags supplied by the host app (Apple's NLTagger),
+// keyed by the char index where each word starts. Set on the thread that
+// parses; when present, they win over the dictionary's tag.
+thread_local! {
+    static EXTERNAL_TAGS: std::cell::RefCell<Option<std::collections::HashMap<usize, UPOS>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Supply tags for the next documents parsed on this thread (`None` clears them).
+pub fn set_external_tags(tags: Option<std::collections::HashMap<usize, UPOS>>) {
+    EXTERNAL_TAGS.with(|t| *t.borrow_mut() = tags);
+}
 use itertools::Itertools;
 
 use crate::expr::{Expr, ExprExt, FirstMatchOf, Repeating, SequenceExpr};
@@ -175,8 +188,10 @@ impl Document {
     fn parse(&mut self, dictionary: &impl Dictionary) {
         self.apply_fixups();
 
-        let chunker = burn_chunker();
-        let tagger = brill_tagger();
+        // FussBucket: no trained tagger or chunker. Tags come from the curated
+        // dictionary (a word with exactly one possible part of speech gets it),
+        // and noun phrases from a rule-based chunker.
+        let chunker = rule_chunker();
 
         for sent in self.tokens.iter_sentences_mut() {
             let token_strings: Vec<_> = sent
@@ -185,7 +200,22 @@ impl Document {
                 .map(|t| t.get_str(&self.source))
                 .collect();
 
-            let token_tags = tagger.tag_sentence(&token_strings);
+            let token_tags: Vec<Option<UPOS>> = sent
+                .iter()
+                .filter(|t| !t.kind.is_whitespace())
+                .map(|t| match &t.kind {
+                    TokenKind::Word(_) => EXTERNAL_TAGS
+                        .with(|e| e.borrow().as_ref().and_then(|m| m.get(&t.span.start).copied()))
+                        .or_else(|| {
+                            dictionary
+                                .get_word_metadata(t.get_ch(&self.source))
+                                .and_then(|m| m.infer_pos_tag())
+                        }),
+                    TokenKind::Punctuation(_) => Some(UPOS::PUNCT),
+                    TokenKind::Number(_) => Some(UPOS::NUM),
+                    _ => None,
+                })
+                .collect();
             let np_flags = chunker.chunk_sentence(&token_strings, &token_tags);
 
             // Annotate DictWord metadata

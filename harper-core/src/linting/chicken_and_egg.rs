@@ -112,7 +112,6 @@ impl ExprLinter for ChickenAndEgg {
         };
 
         let span = toks[..toks.len() - 2].span()?;
-        eprintln!("span: {:?}", span.get_content_string(src));
 
         Some(Lint {
             span,
